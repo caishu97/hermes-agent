@@ -805,6 +805,18 @@ class GatewayBusySessionMixin:
             logger.debug("Failed to send busy-ack: %s", e)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+        # Bot-to-bot traffic between this gateway's own profiles is expected in shared rooms
+        # (e.g. two bots of different profiles in one Matrix room). Ignore it silently instead
+        # of running the human auth gate and logging "Dropping message from unauthorized user"
+        # (#141435). Human messages are unaffected: Matrix marks only MATRIX_BOT_USERS senders.
+        _src = getattr(event, "source", None)
+        _platform = getattr(_src, "platform", None)
+        if (
+            getattr(_src, "is_bot", False)
+            and getattr(_platform, "value", _platform) == "matrix"
+        ):
+            logger.debug("Ignoring bot-to-bot Matrix message (session=%s)", session_key)
+            return True
         # Gateway wakes have no external user identity. Admit them before auth/drain/approval
         # handling, without merging their text into an already queued human message.
         if event.internal and event.allow_gateway_control:

@@ -895,6 +895,9 @@ class MatrixAdapter(BasePlatformAdapter):
         # seeded by the bridge) → empty. Under multiplex os.environ is the DEFAULT profile's allowlist,
         # which must not decide who approves tool calls on a secondary bot.
         self._allowed_user_ids: set[str] = _extra_csv_set(config, "allowed_users", "MATRIX_ALLOWED_USERS")
+        # Bot senders (other gateway profiles) in shared rooms: mark them on SessionSource so the
+        # gateway can ignore bot-to-bot traffic instead of auth-dropping it (#141435).
+        self._bot_user_ids: set[str] = _extra_csv_set(config, "bot_users", "MATRIX_BOT_USERS")
         self._allowed_room_ids: set[str] = set(self._allowed_rooms)
         self._ignored_user_patterns: list[re.Pattern[str]] = []
         for pattern in _csv_set(_extra_or_secret(config.extra, "ignore_user_patterns", "MATRIX_IGNORE_USER_PATTERNS", "")):
@@ -2123,7 +2126,8 @@ class MatrixAdapter(BasePlatformAdapter):
         source = self.build_source(
             chat_id=room_id, chat_name=identity.display_name, chat_type=chat_type, user_id=sender,
             user_name=display_name, thread_id=thread_id, chat_topic=identity.room_topic,
-            guild_id=identity.server_name, parent_chat_id=room_id if thread_id else None, message_id=event_id)
+            guild_id=identity.server_name, parent_chat_id=room_id if thread_id else None, message_id=event_id,
+            is_bot=sender in self._bot_user_ids)
         if thread_id:
             await self._threads.mark_async(thread_id)  # covers real roots and synthetic ones alike
         self._background_read_receipt(room_id, event_id)
