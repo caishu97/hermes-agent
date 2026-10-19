@@ -857,6 +857,10 @@ class MatrixAdapter(BasePlatformAdapter):
         self._parked_voices = ParkedVoices()  # unmentioned voice awaiting a bare @mention
         self._require_mention: bool = self._parse_require_mention(config)
         self._thread_require_mention: bool = self._parse_thread_require_mention(config)
+        # Observe unmentioned group messages (context-only, no reply turn). See _record_observed.
+        self._observe_unmentioned: bool = self._extra_truthy(
+            config, "observe_unmentioned", "MATRIX_OBSERVE_UNMENTIONED", "false")
+        self._observed_messages: dict[str, list[tuple[float, str, str]]] = {}
         self._free_rooms: set[str] = _extra_csv_set(config, "free_response_rooms", "MATRIX_FREE_RESPONSE_ROOMS")
         # If non-empty, bot ONLY responds in these rooms (whitelist); DMs exempt.
         self._allowed_rooms: set[str] = _extra_csv_set(config, "allowed_rooms", "MATRIX_ALLOWED_ROOMS")
@@ -895,6 +899,9 @@ class MatrixAdapter(BasePlatformAdapter):
         # seeded by the bridge) → empty. Under multiplex os.environ is the DEFAULT profile's allowlist,
         # which must not decide who approves tool calls on a secondary bot.
         self._allowed_user_ids: set[str] = _extra_csv_set(config, "allowed_users", "MATRIX_ALLOWED_USERS")
+        # Bot senders (other gateway profiles) in shared rooms; used for is_bot / allow_bots and
+        # for bot-to-bot room chat (#141435).
+        self._bot_user_ids: set[str] = _extra_csv_set(config, "bot_users", "MATRIX_BOT_USERS")
         self._allowed_room_ids: set[str] = set(self._allowed_rooms)
         self._ignored_user_patterns: list[re.Pattern[str]] = []
         for pattern in _csv_set(_extra_or_secret(config.extra, "ignore_user_patterns", "MATRIX_IGNORE_USER_PATTERNS", "")):
@@ -2060,6 +2067,29 @@ class MatrixAdapter(BasePlatformAdapter):
         elif msgtype in ("m.text", "m.notice"):
             await self._handle_text_message(room_id, sender, event_id, event_ts, source_content, relates_to)
 
+    _OBSERVE_TTL_S = 900
+    _OBSERVE_MAX = 20
+
+    def _record_observed(self, room_id: str, sender_name: str, body: str) -> None:
+        """Remember an unmentioned group message so the next turn can see it (no reply)."""
+        now = time.time()
+        items = [i for i in self._observed_messages.get(room_id, []) if now - i[0] <= self._OBSERVE_TTL_S]
+        items.append((now, sender_name, body))
+        self._observed_messages[room_id] = items[-self._OBSERVE_MAX:]
+
+    def _take_observed(self, room_id: str) -> str:
+        """Consume observed context for a turn; returns a text prefix ('' when none)."""
+        now = time.time()
+        items = [i for i in self._observed_messages.pop(room_id, []) if now - i[0] <= self._OBSERVE_TTL_S]
+        if not items:
+            return ""
+        lines = [f"{name}: {text}" for _, name, text in items]
+        return (
+            "[room context — messages since your last turn; you were not mentioned]\n"
+            + "\n".join(lines)
+            + "\n[end room context]\n\n"
+        )
+
     async def _resolve_message_context(
         self, room_id: str, sender: str, event_id: str, body: str, source_content: dict,
         relates_to: dict, mention_claimed: bool = False,
@@ -2085,9 +2115,19 @@ class MatrixAdapter(BasePlatformAdapter):
                 if not is_mentioned and not body.startswith("/"):
                     if voice_gate is not None:  # parkable voice: a bare @mention may follow (Element X)
                         self._parked_voices.park(room_id, sender, voice_gate, event_id, source_content, relates_to)
-                    logger.debug(
-                        "Matrix: ignoring message %s in %s — no @mention "
-                        "(set MATRIX_REQUIRE_MENTION=false to disable)", event_id, room_id)
+                    if self._observe_unmentioned:
+                        try:
+                            who = await self._get_display_name(room_id, sender) or sender
+                        except Exception:
+                            who = sender
+                        self._record_observed(room_id, who, body)
+                        logger.debug(
+                            "Matrix: observed unmentioned message %s in %s (no reply turn)",
+                            event_id, room_id)
+                    else:
+                        logger.debug(
+                            "Matrix: ignoring message %s in %s — no @mention "
+                            "(set MATRIX_REQUIRE_MENTION=false to disable)", event_id, room_id)
                     return None
             # thread_require_mention: even inside a bot thread require @mention — prevents
             # infinite reply loops when several bots share one thread.
@@ -2119,11 +2159,16 @@ class MatrixAdapter(BasePlatformAdapter):
                 thread_id = event_id
         if voice_gate is not None:  # decided (parked or passing): don't hold bare mentions any longer
             self._parked_voices.release(room_id, sender, voice_gate)
+        if self._observe_unmentioned and not is_dm:
+            prefix = self._take_observed(room_id)
+            if prefix:
+                body = prefix + body
         display_name = await self._get_display_name(room_id, sender)
         source = self.build_source(
             chat_id=room_id, chat_name=identity.display_name, chat_type=chat_type, user_id=sender,
             user_name=display_name, thread_id=thread_id, chat_topic=identity.room_topic,
-            guild_id=identity.server_name, parent_chat_id=room_id if thread_id else None, message_id=event_id)
+            guild_id=identity.server_name, parent_chat_id=room_id if thread_id else None, message_id=event_id,
+            is_bot=sender in self._bot_user_ids)
         if thread_id:
             await self._threads.mark_async(thread_id)  # covers real roots and synthetic ones alike
         self._background_read_receipt(room_id, event_id)
