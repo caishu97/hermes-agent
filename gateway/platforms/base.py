@@ -4055,6 +4055,31 @@ class BasePlatformAdapter(ABC):
     async def _handle_message_while_active(self, event: MessageEvent, session_key: str) -> None:
         """Route a message that arrived while ``session_key`` is busy: bypass
         commands / clarify replies dispatch inline, everything else is queued."""
+        # Per-profile claim guard (upstream FR #141435): a room may already have an
+        # active session for ANOTHER profile's bot. Re-derive this event's key from its
+        # own identity; never queue/auth-drop the second bot into the first's session.
+        try:
+            self._canonicalize(event.source)
+            correct_key = self._source_session_key(event.source)
+            from hermes_state_keys import profile_from_session_key
+            active_profile = profile_from_session_key(session_key)
+            event_profile = profile_from_session_key(correct_key)
+            if (
+                correct_key
+                and correct_key != session_key
+                and event_profile
+                and active_profile
+                and event_profile != active_profile
+                and correct_key not in self._active_sessions
+            ):
+                logger.info(
+                    "[%s] event profile %s != active session profile %s (key=%s); starting %s",
+                    self.name, event_profile, active_profile, session_key, correct_key,
+                )
+                event._gateway_accepted = self._start_session_processing(event, correct_key)
+                return
+        except Exception:
+            logger.debug("[%s] profile-claim guard failed", self.name, exc_info=True)
         # The shared runtime's durable FIFO replaces the adapter's busy-message slot.
         if self._shared_runtime_owns_input(event):
             from gateway.session_ingress_burst import dispatch_busy_burst

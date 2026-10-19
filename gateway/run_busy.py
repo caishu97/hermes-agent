@@ -885,6 +885,23 @@ class GatewayBusySessionMixin:
             logger.debug("Failed to send busy-ack: %s", e)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+        # Per-profile claim guard (upstream FR #141435): the active session may belong to a
+        # DIFFERENT profile's bot in the same room. Never auth-drop the second bot here; the
+        # profile-aware caller opens its own session instead.
+        try:
+            from hermes_state_keys import profile_from_session_key
+            from gateway.session_identity import identity_of
+            active_profile = profile_from_session_key(session_key)
+            identity = identity_of(event.source)
+            event_profile = identity.session_key_profile if identity is not None else None
+            if event_profile and active_profile and event_profile != active_profile:
+                logger.info(
+                    "Active session %s belongs to profile %s; not absorbing event for profile %s",
+                    session_key, active_profile, event_profile,
+                )
+                return False
+        except Exception:
+            logger.debug("profile mismatch guard failed", exc_info=True)
         # Gateway wakes have no external user identity. Admit them before auth/drain/approval
         # handling, without merging their text into an already queued human message.
         if event.internal and event.allow_gateway_control:
