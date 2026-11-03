@@ -1,0 +1,18 @@
+name: teamx-login
+label: teamx cloud login
+kind: tool
+version: 0.1.0
+description: >
+  Issue a single-use teamx cloud login link for the CURRENT chat user. The
+  Matrix identity is taken from the authenticated gateway session
+  (HERMES_SESSION_USER_ID), never from model input, so the agent cannot be
+  tricked into minting a link for somebody else. Requires TEAMX_AGENT_TOKEN.
+requires_env:
+  - name: TEAMX_AGENT_TOKEN
+    description: "teamx cloud agent token (Bearer) — issued on the teamx platform host"
+    prompt: "teamx agent token"
+    password: true
+  - name: TEAMX_CLOUD_URL
+    description: "teamx cloud base URL (default https://teamx.beer)"
+    prompt: "teamx cloud URL"
+    password: false
