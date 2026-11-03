@@ -70,6 +70,24 @@ def _session_user_id() -> str:
         return (os.environ.get("HERMES_SESSION_USER_ID") or "").strip()
 
 
+def _session_chat_type() -> str:
+    """Gateway chat type for this turn (``dm`` / ``group``); "" when unavailable."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return (get_session_env("HERMES_SESSION_CHAT_TYPE") or "").strip().lower()
+    except Exception:  # pragma: no cover
+        return (os.environ.get("HERMES_SESSION_CHAT_TYPE") or "").strip().lower()
+
+
+def _dm_only_message() -> str | None:
+    """Login links are DM-only: refuse in group/space rooms (task-279 V5)."""
+    chat_type = _session_chat_type()
+    if chat_type and chat_type != "dm":
+        return "登录链接只在私聊里发送，请私聊我获取（群里不外发凭证）。"
+    return None
+
+
 def _api_base() -> str:
     return (os.environ.get("TEAMX_CLOUD_URL") or "https://teamx.beer").rstrip("/")
 
@@ -124,6 +142,8 @@ def _error_reply(status: int, data: dict[str, Any]) -> str:
 
 def handle_teamx_login_link(args: dict[str, Any] | None = None, **_kw) -> str:
     # NOTE: args is ignored on purpose — identity must never come from the model.
+    if (dm_msg := _dm_only_message()) is not None:
+        return dm_msg
     mxid = _session_user_id()
     if not mxid.startswith("@"):
         return "无法确认你的 Matrix 身份（会话上下文里没有 @user:server），请私聊我重试。"
@@ -140,6 +160,8 @@ def handle_teamx_login_link(args: dict[str, Any] | None = None, **_kw) -> str:
 
 
 def handle_teamx_register(args: dict[str, Any] | None = None, **_kw) -> str:
+    if (dm_msg := _dm_only_message()) is not None:
+        return dm_msg
     mxid = _session_user_id()
     if not mxid.startswith("@"):
         return "无法确认你的 Matrix 身份（会话上下文里没有 @user:server），请私聊我重试。"

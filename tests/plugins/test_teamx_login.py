@@ -75,6 +75,20 @@ def test_missing_agent_token_fails_closed(mod, monkeypatch):
     assert "未配置" in reply
 
 
+def test_group_room_refuses_to_emit_link(mod, monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_CHAT_TYPE", "group")
+    monkeypatch.setattr(mod, "_post", lambda path, payload: (200, {"ok": True, "url": "/#login=x"}))
+    reply = mod.handle_teamx_login_link({})
+    assert "只在私聊" in reply
+    assert "#login=" not in reply
+
+
+def test_dm_allows_link(mod, monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_CHAT_TYPE", "dm")
+    monkeypatch.setattr(mod, "_post", lambda path, payload: (200, {"ok": True, "url": "/#login=x"}))
+    assert "#login=x" in mod.handle_teamx_login_link({})
+
+
 def test_register_requires_code(mod):
     reply = mod.handle_teamx_register({})
     assert "邀请码" in reply
